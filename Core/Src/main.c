@@ -33,10 +33,10 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define TRIG_PORT   GPIOA
-#define TRIG_PIN1   GPIO_PIN_8
-#define TRIG_PIN2   GPIO_PIN_9
-#define TRIG_PIN3   GPIO_PIN_10
-#define TRIG_PIN4   GPIO_PIN_11
+#define TRIG_PIN1   GPIO_PIN_11
+#define TRIG_PIN2   GPIO_PIN_10
+#define TRIG_PIN3   GPIO_PIN_9
+#define TRIG_PIN4   GPIO_PIN_8
 
 #define SEL_PORT    GPIOB
 #define SEL1_PIN    GPIO_PIN_5
@@ -54,10 +54,15 @@
 /* USER CODE BEGIN PM */
 #define BURST_CYCLE            8U          // 8 siklus per burst
 #define BLANKING_US            1000UL      // dead time (us)
-#define LISTEN_US              30000UL     // window tunggu echo (us)
-#define CYCLE_MS               60UL       // interval antar sequence (ms) 60
+#define LISTEN_US              3000UL     // window tunggu echo (us) 30000
+#define CYCLE_MS               0UL       // interval antar sequence (ms) 60
 #define SPEED_OF_SOUND_CM_US   0.0343f
-#define DIST_OFFSET            0.0f
+#define DIST_OFFSET            -5.0f
+
+#define FILTER_ALPHA        0.3f    // EMA weight makin kecil makin lambat respon
+#define MAX_JUMP_CM         15.0f
+#define OUTLIER_ALPHA       0.1f
+#define NO_ECHO_CONFIRM     3
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -100,6 +105,10 @@ float distance_set[4] = {
 		999,
 		999
 };
+
+static float   filtered_distance[4]   = {999, 999, 999, 999};
+static uint8_t filter_initialized[4]  = {0, 0, 0, 0};
+static uint8_t no_echo_count[4]       = {0, 0, 0, 0};
 
 const float distance_close = 24.0;
 const float distance_medium = 30.0;
@@ -248,24 +257,60 @@ void processEcho(void)
 {
     char buf[96];
     char num[24];
+    uint8_t ch = active_channel;
 
     if (echo_detected)
     {
         uint32_t tof_us = echoTime - echo_burstStartTime;
         float distance_cm = (tof_us * SPEED_OF_SOUND_CM_US) / 2.0f - DIST_OFFSET;
-        distance_set[active_channel] = distance_cm;
-        float_to_str(distance_cm, num, 2);
 
-//        sprintf(buf, "| CH%d Distance = %s cm | tof = %lu - %lu",
-//                active_channel + 1, num, (unsigned long)echoTime, (unsigned long) echo_burstStartTime);
-        sprintf(buf, "| CH%d %s cm",
-                        active_channel + 1, num);
+        no_echo_count[ch] = 0;
+
+        if (!filter_initialized[ch])
+        {
+            filtered_distance[ch] = distance_cm;
+            filter_initialized[ch] = 1;
+        }
+        else
+        {
+            float delta = distance_cm - filtered_distance[ch];
+            if (delta < 0) delta = -delta;
+
+            if (delta > MAX_JUMP_CM)
+            {
+                filtered_distance[ch] += (distance_cm - filtered_distance[ch]) * OUTLIER_ALPHA;
+            }
+            else
+            {
+                filtered_distance[ch] += (distance_cm - filtered_distance[ch]) * FILTER_ALPHA;
+            }
+        }
+
+        distance_set[ch] = filtered_distance[ch];
+
+        float_to_str(filtered_distance[ch], num, 2);
+        sprintf(buf, "| CH%d %s cm", ch + 1, num);
         uart_print(buf);
     }
     else
     {
-        sprintf(buf, "| CH%d No Echo", active_channel + 1);
-        distance_set[active_channel] = 999;
+        no_echo_count[ch]++;
+
+        if (no_echo_count[ch] >= NO_ECHO_CONFIRM)
+        {
+            distance_set[ch]        = 999;
+            filtered_distance[ch]   = 999;
+            filter_initialized[ch]  = 0;
+
+            sprintf(buf, "| CH%d No Echo", ch + 1);
+        }
+        else
+        {
+            distance_set[ch] = filtered_distance[ch];
+
+            sprintf(buf, "| CH%d No Echo (hold)", ch + 1);
+        }
+
         uart_print(buf);
     }
 }
@@ -280,14 +325,21 @@ void buzzerNotify(){
 		}
 	}
 
-	if(closest_index == 0){
+	if(closest_index != 99){
 		if(closest_point < distance_close){
 			static uint32_t last_toggle = 0;
-			if (HAL_GetTick() - last_toggle >= 100)
-			{
+			if (HAL_GetTick() - last_toggle >= 50){
 				last_toggle = HAL_GetTick();
 				HAL_GPIO_TogglePin(BUZZ_PORT, BUZZ_PIN);
 			}
+		}else if(closest_point > distance_close && closest_point < distance_medium){
+			static uint32_t last_toggle = 0;
+			if (HAL_GetTick() - last_toggle >= 150){
+				last_toggle = HAL_GetTick();
+				HAL_GPIO_TogglePin(BUZZ_PORT, BUZZ_PIN);
+			}
+		}else{
+			HAL_GPIO_WritePin(BUZZ_PORT, BUZZ_PIN, GPIO_PIN_RESET);
 		}
 	}else{
 		HAL_GPIO_WritePin(BUZZ_PORT, BUZZ_PIN, GPIO_PIN_RESET);
@@ -337,7 +389,7 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 
 /**
   * @brief  The application entry point.
-  * @retval ints
+  * @retval int
   */
 int main(void)
 {
@@ -572,9 +624,13 @@ static void MX_GPIO_Init(void)
 /* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOD_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(BUZZ_GPIO_Port, BUZZ_Pin, GPIO_PIN_RESET);
@@ -584,6 +640,13 @@ static void MX_GPIO_Init(void)
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOB, SEL1_Pin|SEL2_Pin|SEL3_Pin, GPIO_PIN_SET);
+
+  /*Configure GPIO pin : PC13 */
+  GPIO_InitStruct.Pin = GPIO_PIN_13;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
   /*Configure GPIO pin : ECHO_Pin */
   GPIO_InitStruct.Pin = ECHO_Pin;
