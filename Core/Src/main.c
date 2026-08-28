@@ -66,6 +66,8 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+CAN_HandleTypeDef hcan;
+
 TIM_HandleTypeDef htim1;
 
 UART_HandleTypeDef huart3;
@@ -113,6 +115,17 @@ static uint8_t no_echo_count[4]       = {0, 0, 0, 0};
 const float distance_close = 24.0;
 const float distance_medium = 30.0;
 const float distance_safe = 50.0;
+
+uint32_t CAN_ID1 = 0x400;
+uint32_t CAN_ID2 = 0x401;
+CAN_TxHeaderTypeDef TxHeader1;
+CAN_TxHeaderTypeDef TxHeader2;
+uint8_t TxData1[8];
+uint8_t TxData2[8];
+uint32_t TxMailbox1;
+uint32_t TxMailbox2;
+static uint32_t lastCanTx = 0;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -120,6 +133,7 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_TIM1_Init(void);
 static void MX_USART3_UART_Init(void);
+static void MX_CAN_Init(void);
 /* USER CODE BEGIN PFP */
 static void DWT_Init(void);
 static inline uint32_t micros(void);
@@ -137,6 +151,26 @@ void buzzerNotify();
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+static void Construct_CANMsg(void)
+{
+	TxHeader1.IDE = CAN_ID_STD;
+	TxHeader1.StdId = CAN_ID1;
+	TxHeader1.RTR = CAN_RTR_DATA;
+	TxHeader1.DLC = 8;
+
+	memcpy(&TxData1[0], &filtered_distance[0], sizeof(float));
+	memcpy(&TxData1[4], &filtered_distance[1], sizeof(float));
+
+	TxHeader2.IDE = CAN_ID_STD;
+	TxHeader2.StdId = CAN_ID2;
+	TxHeader2.RTR = CAN_RTR_DATA;
+	TxHeader2.DLC = 8;
+
+	memcpy(&TxData2[0], &filtered_distance[2], sizeof(float));
+	memcpy(&TxData2[4], &filtered_distance[3], sizeof(float));
+
+}
+
 static void DWT_Init(void)
 {
     CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
@@ -418,7 +452,13 @@ int main(void)
   MX_GPIO_Init();
   MX_TIM1_Init();
   MX_USART3_UART_Init();
+  MX_CAN_Init();
   /* USER CODE BEGIN 2 */
+  if (HAL_CAN_Start(&hcan) != HAL_OK)
+  {
+      Error_Handler();
+  }
+
   allTriggerIdle();
   selectChan(0);
 
@@ -489,7 +529,22 @@ int main(void)
 			  state = STATE_IDLE;
 		  }
 	  }
+
 	  buzzerNotify();
+
+	  //CanBus data send at 50Hz rate
+	  if(HAL_GetTick() - lastCanTx >= 20){
+		  lastCanTx = HAL_GetTick();
+
+		  Construct_CANMsg();
+		  HAL_StatusTypeDef CanBusStatus1 = HAL_CAN_AddTxMessage(&hcan, &TxHeader1, TxData1, &TxMailbox1);
+		  HAL_StatusTypeDef CanBusStatus2 = HAL_CAN_AddTxMessage(&hcan, &TxHeader2, TxData2, &TxMailbox2);
+		  if (CanBusStatus1 != HAL_OK || CanBusStatus2 != HAL_OK)
+		  {
+			 uint32_t err = HAL_CAN_GetError(&hcan);
+		  }
+	  }
+
   }
   /* USER CODE END 3 */
 }
@@ -531,6 +586,43 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
+}
+
+/**
+  * @brief CAN Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_CAN_Init(void)
+{
+
+  /* USER CODE BEGIN CAN_Init 0 */
+
+  /* USER CODE END CAN_Init 0 */
+
+  /* USER CODE BEGIN CAN_Init 1 */
+
+  /* USER CODE END CAN_Init 1 */
+  hcan.Instance = CAN1;
+  hcan.Init.Prescaler = 4;
+  hcan.Init.Mode = CAN_MODE_LOOPBACK;
+  hcan.Init.SyncJumpWidth = CAN_SJW_1TQ;
+  hcan.Init.TimeSeg1 = CAN_BS1_13TQ;
+  hcan.Init.TimeSeg2 = CAN_BS2_4TQ;
+  hcan.Init.TimeTriggeredMode = DISABLE;
+  hcan.Init.AutoBusOff = DISABLE;
+  hcan.Init.AutoWakeUp = DISABLE;
+  hcan.Init.AutoRetransmission = ENABLE;
+  hcan.Init.ReceiveFifoLocked = DISABLE;
+  hcan.Init.TransmitFifoPriority = DISABLE;
+  if (HAL_CAN_Init(&hcan) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN CAN_Init 2 */
+
+  /* USER CODE END CAN_Init 2 */
+
 }
 
 /**
